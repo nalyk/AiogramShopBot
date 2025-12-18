@@ -93,6 +93,128 @@ Tea (is_product=False)
 
 ---
 
+## Admin Workflow Analysis (CRITICAL)
+
+### Current vs New Admin Responsibilities
+
+| Task | Current System | New System |
+|------|---------------|------------|
+| Set product description | In import file (per item) | On Category (once) |
+| Set product price | In import file (per item) | On Category (once) |
+| Set product photo | N/A | On Category (separate upload) |
+| Add stock (items) | Import file | Import file (simplified) |
+| Edit product details | Re-import all items | **NEW: Admin UI** |
+
+### The Workflow Shift
+
+**BEFORE (Current):**
+```
+Admin creates items.txt:
+  Tea;Green Tea;Great green tea;50.0;private_data_1
+  Tea;Green Tea;Great green tea;50.0;private_data_2
+  Tea;Green Tea;Great green tea;50.0;private_data_3
+  ↓
+Upload file → Creates 3 items (each with duplicated desc/price)
+```
+
+**AFTER (New):**
+```
+Step 1: Admin creates items.txt (simplified):
+  Tea>Green>Green Tea;Great green tea;50.0;private_data_1
+  Tea>Green>Green Tea;Great green tea;50.0;private_data_2
+  Tea>Green>Green Tea;Great green tea;50.0;private_data_3
+  ↓
+Upload file → Creates product category + 3 items
+
+Step 2 (optional): Admin uploads product photo via bot UI
+  Manage Products → Select "Green Tea" → Upload Photo
+```
+
+### Import Behavior Rules
+
+```
+IMPORT LOGIC:
+
+1. Parse line: path, description, price, private_data
+
+2. Check if product category exists at path:
+
+   IF NOT EXISTS:
+     → Create category path
+     → Create product with description, price
+     → Create item with private_data
+
+   IF EXISTS:
+     → Validate price matches (warn if different?)
+     → Create item with private_data
+     → IGNORE description/price in file (use existing)
+
+3. Photo is NEVER in import file
+   → Must be uploaded separately via admin UI
+```
+
+### New Admin Menu Structure
+
+```
+📦 Inventory Management
+│
+├── ➕ Add Items
+│   ├── 📄 JSON Format
+│   └── 📄 TXT Format
+│
+├── 🛍️ Manage Products (NEW)
+│   │
+│   ├── [Browse Tree View]
+│   │   Tea (3 products inside)
+│   │   └── Green (2 products)
+│   │       ├── 🛍️ Green Tea ($50) - 15 in stock
+│   │       └── 🛍️ Morning Dew ($45) - 8 in stock
+│   │
+│   └── [Select Product] → Product Actions:
+│       ├── 📝 Edit Description
+│       ├── 💰 Edit Price
+│       ├── 📷 Upload/Change Photo
+│       ├── 📊 View Stock Count
+│       └── 🗑️ Delete Product (+ all items)
+│
+├── 📁 Manage Categories (NEW)
+│   ├── ➕ Create Category
+│   ├── ✏️ Rename Category
+│   └── 🗑️ Delete Category (cascades to children)
+│
+└── 🗑️ Delete by Category (existing, modified)
+    └── Shows tree, deletes branch + all items
+```
+
+### New Admin States Required
+
+```python
+class AdminInventoryManagementStates(StatesGroup):
+    document = State()           # Existing: file upload
+
+    # NEW states for product management
+    edit_description = State()   # Editing product description
+    edit_price = State()         # Editing product price
+    photo_upload = State()       # Uploading product photo
+
+    # NEW states for category management
+    create_category_name = State()    # Creating new category
+    create_category_parent = State()  # Selecting parent
+    rename_category = State()         # Renaming category
+```
+
+### New EntityType Values
+
+```python
+class EntityType(IntEnum):
+    CATEGORY = 1      # Non-product category node
+    SUBCATEGORY = 2   # DEPRECATED - remove
+    ITEM = 3          # Individual item
+    PRODUCT = 4       # NEW: Product category (is_product=True)
+```
+
+---
+
 ## Implementation Steps
 
 ### Phase 1: Database Models
@@ -948,34 +1070,428 @@ class ItemService:
 
 ---
 
-### Phase 7: Admin Photo Upload
+### Phase 7: Admin Product & Category Management (COMPREHENSIVE)
 
-#### 7.1 Add Photo Upload Handler
+This phase adds the MISSING admin functionality for managing products and categories.
 
-Add new states and handlers for uploading product photos:
+#### 7.1 New Admin States (`handlers/admin/constants.py`)
 
 ```python
-# In handlers/admin/constants.py
+from aiogram.fsm.state import StatesGroup, State
+
+
 class AdminInventoryManagementStates(StatesGroup):
+    # Existing
     document = State()
-    photo_upload = State()  # NEW
+
+    # Product management (NEW)
+    edit_description = State()
+    edit_price = State()
+    photo_upload = State()
+
+    # Category management (NEW)
+    create_category_name = State()
+    create_product_name = State()
+    create_product_description = State()
+    create_product_price = State()
+```
+
+#### 7.2 Updated Inventory Management Menu (`services/admin.py`)
+
+```python
+@staticmethod
+async def get_inventory_management_menu() -> tuple[str, InlineKeyboardBuilder]:
+    kb_builder = InlineKeyboardBuilder()
+
+    # Existing: Add items
+    kb_builder.button(
+        text=Localizator.get_text(BotEntity.ADMIN, "add_items"),
+        callback_data=AdminInventoryManagementCallback.create(level=1, entity_type=EntityType.ITEM)
+    )
+
+    # NEW: Manage Products
+    kb_builder.button(
+        text=Localizator.get_text(BotEntity.ADMIN, "manage_products"),
+        callback_data=AdminInventoryManagementCallback.create(level=5, entity_type=EntityType.PRODUCT)
+    )
+
+    # NEW: Manage Categories
+    kb_builder.button(
+        text=Localizator.get_text(BotEntity.ADMIN, "manage_categories"),
+        callback_data=AdminInventoryManagementCallback.create(level=10, entity_type=EntityType.CATEGORY)
+    )
+
+    # Existing: Delete (modified)
+    kb_builder.button(
+        text=Localizator.get_text(BotEntity.ADMIN, "delete_items"),
+        callback_data=AdminInventoryManagementCallback.create(level=2, entity_type=EntityType.PRODUCT)
+    )
+
+    kb_builder.adjust(1)
+    kb_builder.row(AdminConstants.back_to_main_button)
+    return Localizator.get_text(BotEntity.ADMIN, "inventory_management"), kb_builder
+```
+
+#### 7.3 Product Management Handlers (`handlers/admin/product_management.py`) - NEW FILE
+
+```python
+from aiogram import Router, F
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
+from callbacks import AdminInventoryManagementCallback, EntityType
+from db import session_commit
+from enums.bot_entity import BotEntity
+from handlers.admin.constants import AdminInventoryManagementStates
+from repositories.category import CategoryRepository
+from utils.custom_filters import AdminIdFilter
+from utils.localizator import Localizator
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+product_management = Router()
 
 
-# In handlers/admin/inventory_management.py - add photo upload handler
-@inventory_management.message(AdminIdFilter(), F.photo, StateFilter(AdminInventoryManagementStates.photo_upload))
-async def upload_product_photo(message: Message, state: FSMContext, session: AsyncSession | Session):
-    state_data = await state.get_data()
-    category_id = state_data['category_id']
+# ============== BROWSE PRODUCTS ==============
 
-    # Get the largest photo
-    photo = message.photo[-1]
-    file_id = photo.file_id
+async def browse_products_tree(callback: CallbackQuery, session: AsyncSession | Session):
+    """Browse category tree to find products."""
+    unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
+    parent_id = unpacked_cb.entity_id  # None for root
 
-    await CategoryRepository.update_photo(category_id, file_id, session)
+    kb_builder = InlineKeyboardBuilder()
+
+    if parent_id is None:
+        # Show root categories
+        categories = await CategoryRepository.get_all_roots(session)
+        title = "📁 Product Tree - Root"
+    else:
+        categories = await CategoryRepository.get_all_children(parent_id, session)
+        parent = await CategoryRepository.get_by_id(parent_id, session)
+        breadcrumb = await CategoryRepository.get_breadcrumb(parent_id, session)
+        title = "📁 " + " > ".join([c.name for c in breadcrumb])
+
+    for cat in categories:
+        if cat.is_product:
+            # Product - show with stock count
+            qty = await CategoryRepository.get_available_qty(cat.id, session)
+            btn_text = f"🛍️ {cat.name} (${cat.price}) - {qty} in stock"
+            cb = AdminInventoryManagementCallback.create(
+                level=6,  # Product detail view
+                entity_type=EntityType.PRODUCT,
+                entity_id=cat.id
+            )
+        else:
+            # Category - show with arrow
+            child_count = await CategoryRepository.count_children(cat.id, session)
+            btn_text = f"📁 {cat.name} ({child_count} items)"
+            cb = AdminInventoryManagementCallback.create(
+                level=5,  # Stay in browse mode
+                entity_type=EntityType.PRODUCT,
+                entity_id=cat.id
+            )
+        kb_builder.button(text=btn_text, callback_data=cb)
+
+    kb_builder.adjust(1)
+
+    # Back button
+    if parent_id is None:
+        kb_builder.row(AdminConstants.back_to_main_button)
+    else:
+        parent_cat = await CategoryRepository.get_by_id(parent_id, session)
+        back_cb = AdminInventoryManagementCallback.create(
+            level=5,
+            entity_type=EntityType.PRODUCT,
+            entity_id=parent_cat.parent_id
+        )
+        kb_builder.row(types.InlineKeyboardButton(
+            text=Localizator.get_text(BotEntity.COMMON, "back_button"),
+            callback_data=back_cb.pack()
+        ))
+
+    await callback.message.edit_text(title, reply_markup=kb_builder.as_markup())
+
+
+# ============== PRODUCT DETAIL VIEW ==============
+
+async def product_detail_view(callback: CallbackQuery, session: AsyncSession | Session):
+    """Show product details with edit options."""
+    unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
+    product = await CategoryRepository.get_by_id(unpacked_cb.entity_id, session)
+    breadcrumb = await CategoryRepository.get_breadcrumb(product.id, session)
+    qty = await CategoryRepository.get_available_qty(product.id, session)
+
+    msg = f"""
+🛍️ <b>Product: {product.name}</b>
+
+📍 Path: {" > ".join([c.name for c in breadcrumb])}
+💰 Price: ${product.price:.2f}
+📝 Description: {product.description or "No description"}
+📦 In Stock: {qty}
+📷 Photo: {"Yes ✅" if product.photo_file_id else "No ❌"}
+"""
+
+    kb_builder = InlineKeyboardBuilder()
+
+    # Edit options
+    kb_builder.button(
+        text="📝 Edit Description",
+        callback_data=AdminInventoryManagementCallback.create(
+            level=7, entity_type=EntityType.PRODUCT, entity_id=product.id
+        )
+    )
+    kb_builder.button(
+        text="💰 Edit Price",
+        callback_data=AdminInventoryManagementCallback.create(
+            level=8, entity_type=EntityType.PRODUCT, entity_id=product.id
+        )
+    )
+    kb_builder.button(
+        text="📷 Upload Photo" if not product.photo_file_id else "📷 Change Photo",
+        callback_data=AdminInventoryManagementCallback.create(
+            level=9, entity_type=EntityType.PRODUCT, entity_id=product.id
+        )
+    )
+    kb_builder.button(
+        text="🗑️ Delete Product",
+        callback_data=AdminInventoryManagementCallback.create(
+            level=3, entity_type=EntityType.PRODUCT, entity_id=product.id
+        )
+    )
+
+    kb_builder.adjust(1)
+
+    # Back to parent
+    back_cb = AdminInventoryManagementCallback.create(
+        level=5, entity_type=EntityType.PRODUCT, entity_id=product.parent_id
+    )
+    kb_builder.row(types.InlineKeyboardButton(
+        text=Localizator.get_text(BotEntity.COMMON, "back_button"),
+        callback_data=back_cb.pack()
+    ))
+
+    # Show photo if exists
+    if product.photo_file_id:
+        await callback.message.delete()
+        await callback.message.answer_photo(
+            photo=product.photo_file_id,
+            caption=msg,
+            reply_markup=kb_builder.as_markup()
+        )
+    else:
+        await callback.message.edit_text(msg, reply_markup=kb_builder.as_markup())
+
+
+# ============== EDIT DESCRIPTION ==============
+
+async def request_new_description(callback: CallbackQuery, state: FSMContext, session: AsyncSession | Session):
+    """Request new description."""
+    unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
+    product = await CategoryRepository.get_by_id(unpacked_cb.entity_id, session)
+
+    await state.update_data(product_id=product.id)
+    await state.set_state(AdminInventoryManagementStates.edit_description)
+
+    kb_builder = InlineKeyboardBuilder()
+    kb_builder.button(
+        text=Localizator.get_text(BotEntity.COMMON, "cancel"),
+        callback_data=AdminInventoryManagementCallback.create(level=6, entity_id=product.id)
+    )
+
+    msg = f"📝 Current description:\n<i>{product.description or 'None'}</i>\n\nSend new description:"
+    await callback.message.edit_text(msg, reply_markup=kb_builder.as_markup())
+
+
+@product_management.message(AdminIdFilter(), StateFilter(AdminInventoryManagementStates.edit_description))
+async def save_description(message: Message, state: FSMContext, session: AsyncSession | Session):
+    """Save new description."""
+    data = await state.get_data()
+    product_id = data['product_id']
+
+    await CategoryRepository.update_description(product_id, message.text, session)
     await session_commit(session)
     await state.clear()
 
-    await message.answer(Localizator.get_text(BotEntity.ADMIN, "photo_uploaded_success"))
+    await message.answer("✅ Description updated!")
+
+
+# ============== EDIT PRICE ==============
+
+async def request_new_price(callback: CallbackQuery, state: FSMContext, session: AsyncSession | Session):
+    """Request new price."""
+    unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
+    product = await CategoryRepository.get_by_id(unpacked_cb.entity_id, session)
+
+    await state.update_data(product_id=product.id)
+    await state.set_state(AdminInventoryManagementStates.edit_price)
+
+    msg = f"💰 Current price: ${product.price:.2f}\n\nSend new price (number only):"
+    await callback.message.edit_text(msg)
+
+
+@product_management.message(AdminIdFilter(), StateFilter(AdminInventoryManagementStates.edit_price))
+async def save_price(message: Message, state: FSMContext, session: AsyncSession | Session):
+    """Save new price."""
+    try:
+        new_price = float(message.text)
+        if new_price <= 0:
+            raise ValueError("Price must be positive")
+
+        data = await state.get_data()
+        product_id = data['product_id']
+
+        await CategoryRepository.update_price(product_id, new_price, session)
+        await session_commit(session)
+        await state.clear()
+
+        await message.answer(f"✅ Price updated to ${new_price:.2f}")
+    except ValueError:
+        await message.answer("❌ Invalid price. Send a positive number:")
+
+
+# ============== UPLOAD PHOTO ==============
+
+async def request_photo(callback: CallbackQuery, state: FSMContext, session: AsyncSession | Session):
+    """Request photo upload."""
+    unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
+    product = await CategoryRepository.get_by_id(unpacked_cb.entity_id, session)
+
+    await state.update_data(product_id=product.id)
+    await state.set_state(AdminInventoryManagementStates.photo_upload)
+
+    kb_builder = InlineKeyboardBuilder()
+    kb_builder.button(
+        text=Localizator.get_text(BotEntity.COMMON, "cancel"),
+        callback_data=AdminInventoryManagementCallback.create(level=6, entity_id=product.id)
+    )
+
+    await callback.message.edit_text(
+        f"📷 Send a photo for <b>{product.name}</b>:",
+        reply_markup=kb_builder.as_markup()
+    )
+
+
+@product_management.message(AdminIdFilter(), F.photo, StateFilter(AdminInventoryManagementStates.photo_upload))
+async def save_photo(message: Message, state: FSMContext, session: AsyncSession | Session):
+    """Save photo."""
+    data = await state.get_data()
+    product_id = data['product_id']
+
+    # Get largest photo
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    await CategoryRepository.update_photo(product_id, file_id, session)
+    await session_commit(session)
+    await state.clear()
+
+    await message.answer("✅ Product photo uploaded!")
+
+
+# ============== NAVIGATION LEVELS ==============
+
+@product_management.callback_query(AdminIdFilter(), AdminInventoryManagementCallback.filter(
+    F.entity_type == EntityType.PRODUCT
+))
+async def product_management_navigation(callback: CallbackQuery, state: FSMContext,
+                                         callback_data: AdminInventoryManagementCallback,
+                                         session: AsyncSession | Session):
+    level = callback_data.level
+    levels = {
+        5: browse_products_tree,        # Browse tree
+        6: product_detail_view,         # View product
+        7: request_new_description,     # Edit description
+        8: request_new_price,           # Edit price
+        9: request_photo,               # Upload photo
+    }
+
+    handler = levels.get(level)
+    if handler:
+        if level in [7, 8, 9]:  # State-based handlers
+            await handler(callback, state, session)
+        else:
+            await handler(callback, session)
+```
+
+#### 7.4 Category Repository - Additional Methods
+
+```python
+# Add to repositories/category.py
+
+@staticmethod
+async def get_all_roots(session: Session | AsyncSession) -> list[CategoryDTO]:
+    """Get ALL root categories (for admin view, not filtered by stock)."""
+    stmt = select(Category).where(Category.parent_id.is_(None))
+    result = await session_execute(stmt, session)
+    return [CategoryDTO.model_validate(c, from_attributes=True) for c in result.scalars().all()]
+
+@staticmethod
+async def get_all_children(parent_id: int, session: Session | AsyncSession) -> list[CategoryDTO]:
+    """Get ALL children (for admin view)."""
+    stmt = select(Category).where(Category.parent_id == parent_id)
+    result = await session_execute(stmt, session)
+    return [CategoryDTO.model_validate(c, from_attributes=True) for c in result.scalars().all()]
+
+@staticmethod
+async def count_children(category_id: int, session: Session | AsyncSession) -> int:
+    """Count direct children."""
+    stmt = select(func.count()).select_from(Category).where(Category.parent_id == category_id)
+    result = await session_execute(stmt, session)
+    return result.scalar()
+
+@staticmethod
+async def update_description(category_id: int, description: str, session: Session | AsyncSession):
+    """Update product description."""
+    stmt = select(Category).where(Category.id == category_id)
+    result = await session_execute(stmt, session)
+    category = result.scalar()
+    category.description = description
+    await session_flush(session)
+
+@staticmethod
+async def update_price(category_id: int, price: float, session: Session | AsyncSession):
+    """Update product price."""
+    stmt = select(Category).where(Category.id == category_id)
+    result = await session_execute(stmt, session)
+    category = result.scalar()
+    category.price = price
+    await session_flush(session)
+
+@staticmethod
+async def update_photo(category_id: int, photo_file_id: str, session: Session | AsyncSession):
+    """Update product photo."""
+    stmt = select(Category).where(Category.id == category_id)
+    result = await session_execute(stmt, session)
+    category = result.scalar()
+    category.photo_file_id = photo_file_id
+    await session_flush(session)
+
+@staticmethod
+async def create_category(name: str, parent_id: int | None, is_product: bool,
+                          price: float | None, description: str | None,
+                          session: Session | AsyncSession) -> Category:
+    """Create a new category or product."""
+    category = Category(
+        name=name,
+        parent_id=parent_id,
+        is_product=is_product,
+        price=price if is_product else None,
+        description=description if is_product else None
+    )
+    session.add(category)
+    await session_flush(session)
+    return category
+```
+
+#### 7.5 Register New Router
+
+```python
+# In bot.py or wherever routers are registered
+from handlers.admin.product_management import product_management
+
+dp.include_router(product_management)
 ```
 
 ---
@@ -987,16 +1503,29 @@ Add new strings to `l10n/en.json`:
 ```json
 {
   "user": {
-    "product_button": "\uD83D\uDCE6 {product_name}| {currency_sym}{price:.2f} | Qty: {available_quantity}",
-    "select_quantity_product": "\uD83D\uDED2 <b>{breadcrumb}</b>\n\n<b>Price:</b> {currency_sym}{price:.2f}\n<b>Description:</b> {description}\n<b>Available:</b> {quantity}",
-    "buy_confirmation_product": "\uD83D\uDED2 <b>{breadcrumb}</b>\n\n<b>Price:</b> {currency_sym}{price:.2f}\n<b>Description:</b> {description}\n<b>Quantity:</b> {quantity}\n<b>Total:</b> {currency_sym}{total_price:.2f}"
+    "product_button": "📦 {product_name}| {currency_sym}{price:.2f} | Qty: {available_quantity}",
+    "select_quantity_product": "🛒 <b>{breadcrumb}</b>\n\n<b>Price:</b> {currency_sym}{price:.2f}\n<b>Description:</b> {description}\n<b>Available:</b> {quantity}",
+    "buy_confirmation_product": "🛒 <b>{breadcrumb}</b>\n\n<b>Price:</b> {currency_sym}{price:.2f}\n<b>Description:</b> {description}\n<b>Quantity:</b> {quantity}\n<b>Total:</b> {currency_sym}{total_price:.2f}"
   },
   "admin": {
-    "upload_product_photo": "\uD83D\uDCF7 <b>Send a photo for this product or \"cancel\" to skip:</b>",
-    "photo_uploaded_success": "\u2705 <b>Product photo uploaded successfully!</b>",
-    "manage_product_photos": "\uD83D\uDDBC\uFE0F Manage Product Photos",
-    "add_items_json_msg_v2": "\uD83D\uDCC4 <b>Send .json file with new items or type \"cancel\" for cancel.</b>\nFile content example:\n<pre><code class=\"language-json\">[\n  {\n    \"path\": [\"Tea\", \"Green\", \"Tea Widow\"],\n    \"description\": \"Our signature blend\",\n    \"price\": 50.0,\n    \"private_data\": \"52.123, 13.456, photo_of_location\"\n  }\n]</code></pre>",
-    "add_items_txt_msg_v2": "\uD83D\uDCC4 <b>Send .txt file with new items or type \"cancel\" for cancel.</b>\nFile content example:\n<pre><code class=\"language-txt\">Tea>Green>Tea Widow;Our signature blend;50.0;52.123, 13.456, photo_of_location\nTea>Green>Tea Widow;Our signature blend;50.0;52.789, 13.012, another_location\n</code></pre>"
+    "manage_products": "🛍️ Manage Products",
+    "manage_categories": "📁 Manage Categories",
+    "delete_items": "🗑️ Delete Items",
+    "product_tree_root": "📁 Product Tree - Root",
+    "upload_product_photo": "📷 <b>Send a photo for this product or \"cancel\" to skip:</b>",
+    "photo_uploaded_success": "✅ <b>Product photo uploaded successfully!</b>",
+    "description_updated": "✅ <b>Description updated!</b>",
+    "price_updated": "✅ <b>Price updated to {currency_sym}{price:.2f}!</b>",
+    "invalid_price": "❌ <b>Invalid price. Send a positive number:</b>",
+    "send_new_description": "📝 Current description:\n<i>{description}</i>\n\n<b>Send new description:</b>",
+    "send_new_price": "💰 Current price: {currency_sym}{price:.2f}\n\n<b>Send new price (number only):</b>",
+    "product_detail": "🛍️ <b>Product: {name}</b>\n\n📍 Path: {breadcrumb}\n💰 Price: {currency_sym}{price:.2f}\n📝 Description: {description}\n📦 In Stock: {quantity}\n📷 Photo: {has_photo}",
+    "edit_description": "📝 Edit Description",
+    "edit_price": "💰 Edit Price",
+    "upload_photo": "📷 Upload Photo",
+    "change_photo": "📷 Change Photo",
+    "add_items_json_msg_v2": "📄 <b>Send .json file with new items or type \"cancel\" for cancel.</b>\nFile content example:\n<pre><code class=\"language-json\">[\n  {\n    \"path\": [\"Tea\", \"Green\", \"Tea Widow\"],\n    \"description\": \"Our signature blend\",\n    \"price\": 50.0,\n    \"private_data\": \"52.123, 13.456, photo_of_location\"\n  }\n]</code></pre>",
+    "add_items_txt_msg_v2": "📄 <b>Send .txt file with new items or type \"cancel\" for cancel.</b>\nFile content example:\n<pre><code class=\"language-txt\">Tea>Green>Tea Widow;Our signature blend;50.0;52.123, 13.456, photo_of_location\nTea>Green>Tea Widow;Our signature blend;50.0;52.789, 13.012, another_location\n</code></pre>"
   }
 }
 ```
@@ -1168,37 +1697,57 @@ if __name__ == "__main__":
 | `services/cart.py` | **MODIFY** - Use category_id only |
 | `services/notification.py` | **MODIFY** - Use breadcrumb |
 
-### Handlers (2 files)
+### Handlers (4 files)
 | File | Action |
 |------|--------|
 | `handlers/user/all_categories.py` | **REWRITE** - Dynamic navigation + photos |
-| `handlers/admin/inventory_management.py` | **MODIFY** - Add photo upload |
+| `handlers/admin/inventory_management.py` | **MODIFY** - Update menu, remove SUBCATEGORY |
+| `handlers/admin/product_management.py` | **CREATE** - Product management UI (NEW) |
+| `handlers/admin/constants.py` | **MODIFY** - Add new states |
 
-### Other (3 files)
+### Other (4 files)
 | File | Action |
 |------|--------|
-| `callbacks.py` | **MODIFY** - Simplify AllCategoriesCallback |
+| `callbacks.py` | **MODIFY** - Simplify AllCategoriesCallback, add PRODUCT EntityType |
 | `l10n/en.json` | **MODIFY** - Add new strings |
 | `l10n/de.json` | **MODIFY** - Add new strings |
+| `bot.py` | **MODIFY** - Register product_management router |
 
 ---
 
 ## Testing Checklist
 
+### User Flow
 - [ ] Root categories display correctly
 - [ ] N-level deep navigation works
 - [ ] Products show with photo, price, description
-- [ ] Quantity selection works
+- [ ] Quantity selection works (1-10)
 - [ ] Add to cart works
 - [ ] Checkout flow works
-- [ ] Item import (JSON) works with new format
-- [ ] Item import (TXT) works with new format
-- [ ] Admin can upload product photos
-- [ ] Admin can delete products/categories
-- [ ] Purchase history shows correct data
-- [ ] Notifications show breadcrumb path
+- [ ] Purchase shows `private_data` correctly
+- [ ] Purchase history shows correct breadcrumb path
 - [ ] Back navigation works at all levels
 - [ ] Pagination works at all levels
+
+### Admin - Item Import
+- [ ] Item import (JSON) works with new path format
+- [ ] Item import (TXT) works with new path format
+- [ ] First import creates product category with description/price
+- [ ] Subsequent imports add items to existing product
+- [ ] Import with non-existent path creates full category tree
+
+### Admin - Product Management (NEW)
+- [ ] Browse product tree shows all categories
+- [ ] Product detail view shows all info + photo
+- [ ] Edit description works
+- [ ] Edit price works (validates positive number)
+- [ ] Upload photo works
+- [ ] Change photo works (replaces existing)
+- [ ] Delete product removes product + all items
+
+### Admin - Category Management
+- [ ] Delete category cascades to children
+- [ ] Notifications show breadcrumb path
 
 ---
 
@@ -1210,6 +1759,7 @@ if __name__ == "__main__":
 | Breaking existing carts | Clear carts before migration or migrate cart_items |
 | Performance with deep trees | Add index on parent_id; limit depth in UI |
 | Complex rollback | Keep old code in separate branch |
+| Admin workflow change | Document new workflow for admins |
 
 ---
 
@@ -1221,6 +1771,7 @@ This implementation provides:
 3. **Image support** via `photo_file_id` stored on product categories
 4. **Simplified Item model** with only unique data (`private_data`)
 5. **Dynamic navigation** that adapts to tree structure
-6. **Backward compatible import** (with new format)
+6. **Full admin product management** - edit description, price, photos
+7. **Backward compatible import** (with new path-based format)
 
 The architecture is now truly universal and future-proof.
