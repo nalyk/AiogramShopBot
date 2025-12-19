@@ -102,28 +102,41 @@ class AddType(IntEnum):
     TXT = 2
 
 
-class EntityType(IntEnum):
-    CATEGORY = 1      # Non-product category (navigation node)
-    PRODUCT = 2       # Product category (is_product=True, can have items)
-    ITEM = 3          # Individual item
+class InventoryAction(IntEnum):
+    BROWSE = 0
+    ADD_CATEGORY = 1
+    ADD_PRODUCT = 2
+    ADD_ITEMS = 3
+    EDIT_PRICE = 4
+    EDIT_DESCRIPTION = 5
+    EDIT_IMAGE = 6
+    DELETE = 7
 
 
-class AdminInventoryManagementCallback(BaseCallback, prefix="inventory_management"):
+class AdminInventoryManagementCallback(BaseCallback, prefix="inv"):
+    category_id: int
+    action: InventoryAction | None
     add_type: AddType | None
-    entity_type: EntityType | None
-    entity_id: int | None
     page: int
     confirmation: bool
 
     @staticmethod
-    def create(level: int, add_type: AddType | None = None, entity_type: EntityType | None = None,
-               entity_id: int | None = None, page: int = 0, confirmation: bool = False):
-        return AdminInventoryManagementCallback(level=level,
-                                                add_type=add_type,
-                                                entity_type=entity_type,
-                                                entity_id=entity_id,
-                                                page=page,
-                                                confirmation=confirmation)
+    def create(
+        level: int,
+        category_id: int = -1,
+        action: InventoryAction | None = None,
+        add_type: AddType | None = None,
+        page: int = 0,
+        confirmation: bool = False
+    ):
+        return AdminInventoryManagementCallback(
+            level=level,
+            category_id=category_id,
+            action=action,
+            add_type=add_type,
+            page=page,
+            confirmation=confirmation
+        )
 
 
 class UserManagementOperation(IntEnum):

@@ -101,11 +101,10 @@ class CategoryService:
             back_btn = unpacked_cb.get_back_button(lvl=0)
             back_btn.callback_data = back_button.pack()
 
-        max_page = await max_page_coro
         kb_builder = await add_pagination_buttons(
             kb_builder,
             unpacked_cb,
-            max_page,
+            max_page_coro,
             back_btn if category_id != -1 else None
         )
 
