@@ -1,7 +1,7 @@
 import math
 from typing import List, Set
 
-from sqlalchemy import select, func, and_, update, text
+from sqlalchemy import select, func, and_, update, text, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -25,19 +25,20 @@ class CategoryRepository:
         """
         Get all category IDs that have available items in their subtree.
         Uses recursive CTE to find product categories with stock and all their ancestors.
+        Excludes inactive (archived) categories.
 
         This enables DB-level filtering for correct pagination.
         """
         cte_query = text("""
             WITH RECURSIVE
-            -- Step 1: Find all product categories with unsold items
+            -- Step 1: Find all ACTIVE product categories with unsold items
             products_with_stock AS (
                 SELECT DISTINCT c.id
                 FROM categories c
                 JOIN items i ON i.category_id = c.id
-                WHERE c.is_product = 1 AND i.is_sold = 0
+                WHERE c.is_product = 1 AND c.is_active = 1 AND i.is_sold = 0
             ),
-            -- Step 2: Recursively find all ancestors of those products
+            -- Step 2: Recursively find all ACTIVE ancestors of those products
             ancestors AS (
                 -- Base case: start with product categories that have stock
                 SELECT id, parent_id
@@ -46,11 +47,11 @@ class CategoryRepository:
 
                 UNION
 
-                -- Recursive case: get parent of each category
+                -- Recursive case: get parent of each category (only if active)
                 SELECT c.id, c.parent_id
                 FROM categories c
                 INNER JOIN ancestors a ON c.id = a.parent_id
-                WHERE c.id IS NOT NULL
+                WHERE c.id IS NOT NULL AND c.is_active = 1
             )
             -- Return all category IDs (products with stock + all their ancestors)
             SELECT DISTINCT id FROM ancestors
@@ -128,18 +129,70 @@ class CategoryRepository:
         return [CategoryDTO.model_validate(c, from_attributes=True) for c in result.scalars().all()]
 
     @staticmethod
+    async def get_all_roots_filtered(page: int, session: Session | AsyncSession, show_archived: bool = False) -> List[CategoryDTO]:
+        """Get root categories filtered by active/archived status (for admin view with pagination)."""
+        from config import PAGE_ENTRIES
+        stmt = (
+            select(Category)
+            .where(Category.parent_id == None, Category.is_active == (not show_archived))
+            .offset(page * PAGE_ENTRIES)
+            .limit(PAGE_ENTRIES)
+        )
+        result = await session_execute(stmt, session)
+        return [CategoryDTO.model_validate(c, from_attributes=True) for c in result.scalars().all()]
+
+    @staticmethod
+    async def get_all_children_filtered(parent_id: int, page: int, session: Session | AsyncSession, show_archived: bool = False) -> List[CategoryDTO]:
+        """Get children filtered by active/archived status (for admin view with pagination)."""
+        from config import PAGE_ENTRIES
+        stmt = (
+            select(Category)
+            .where(Category.parent_id == parent_id, Category.is_active == (not show_archived))
+            .offset(page * PAGE_ENTRIES)
+            .limit(PAGE_ENTRIES)
+        )
+        result = await session_execute(stmt, session)
+        return [CategoryDTO.model_validate(c, from_attributes=True) for c in result.scalars().all()]
+
+    @staticmethod
+    async def get_max_page_roots_filtered(session: Session | AsyncSession, show_archived: bool = False) -> int:
+        """Get max page for root categories filtered by active/archived status."""
+        from config import PAGE_ENTRIES
+        stmt = select(func.count()).select_from(Category).where(
+            Category.parent_id == None,
+            Category.is_active == (not show_archived)
+        )
+        result = await session_execute(stmt, session)
+        count = result.scalar() or 0
+        return max(0, (count - 1) // PAGE_ENTRIES)
+
+    @staticmethod
+    async def get_max_page_children_filtered(parent_id: int, session: Session | AsyncSession, show_archived: bool = False) -> int:
+        """Get max page for children filtered by active/archived status."""
+        from config import PAGE_ENTRIES
+        stmt = select(func.count()).select_from(Category).where(
+            Category.parent_id == parent_id,
+            Category.is_active == (not show_archived)
+        )
+        result = await session_execute(stmt, session)
+        count = result.scalar() or 0
+        return max(0, (count - 1) // PAGE_ENTRIES)
+
+    @staticmethod
     async def has_available_items(category_id: int, session: Session | AsyncSession) -> bool:
         """
         Check if a category or any of its descendants has unsold items.
         Uses recursive CTE for efficient single-query traversal.
+        Only considers active categories.
         """
         cte_query = text("""
             WITH RECURSIVE category_tree AS (
-                SELECT id, is_product FROM categories WHERE id = :category_id
+                SELECT id, is_product FROM categories WHERE id = :category_id AND is_active = 1
                 UNION ALL
                 SELECT c.id, c.is_product
                 FROM categories c
                 INNER JOIN category_tree ct ON c.parent_id = ct.id
+                WHERE c.is_active = 1
             )
             SELECT COUNT(*) FROM items
             WHERE category_id IN (
@@ -431,3 +484,41 @@ class CategoryRepository:
         session.add(category)
         await session_flush(session)
         return category
+
+    @staticmethod
+    async def set_inactive(category_id: int, session: Session | AsyncSession):
+        """Mark a category as inactive (archive). Used when category has sold items."""
+        stmt = update(Category).where(Category.id == category_id).values(is_active=False)
+        await session_execute(stmt, session)
+
+    @staticmethod
+    async def set_active(category_id: int, session: Session | AsyncSession):
+        """Mark a category as active (unarchive)."""
+        stmt = update(Category).where(Category.id == category_id).values(is_active=True)
+        await session_execute(stmt, session)
+
+    @staticmethod
+    async def delete_by_id(category_id: int, session: Session | AsyncSession):
+        """Delete a category by ID. Use only when no sold items exist (CASCADE will delete unsold items)."""
+        stmt = delete(Category).where(Category.id == category_id)
+        await session_execute(stmt, session)
+
+    @staticmethod
+    async def count_sold_in_subtree(category_id: int, session: Session | AsyncSession) -> int:
+        """
+        Count all sold items in this category and its entire subtree.
+        Uses recursive CTE to find all descendant categories.
+        """
+        cte_query = text("""
+            WITH RECURSIVE category_tree AS (
+                SELECT id FROM categories WHERE id = :category_id
+                UNION ALL
+                SELECT c.id FROM categories c
+                INNER JOIN category_tree ct ON c.parent_id = ct.id
+            )
+            SELECT COUNT(*) FROM items i
+            INNER JOIN category_tree ct ON i.category_id = ct.id
+            WHERE i.is_sold = 1
+        """)
+        result = await session_execute(cte_query, session, {"category_id": category_id})
+        return result.scalar() or 0

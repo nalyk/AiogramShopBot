@@ -115,7 +115,15 @@
     "edit_product": "✏️ Edit Product",
     "edit_price": "💰 Edit Price",
     "edit_description": "📝 Edit Description",
-    "edit_image": "🖼️ Edit Image"
+    "edit_image": "🖼️ Edit Image",
+    "show_archived": "🗄️ Show Archived",
+    "show_active": "📂 Show Active",
+    "confirm_archive_category": "⚠️ <b>Category <u>{name}</u> has {sold_count} sold items.</b>\n\nThis category will be <b>archived</b> (hidden from users) but preserved for purchase history.\n\n{qty} unsold items will remain.\n\nProceed with archive?",
+    "confirm_delete_category": "⚠️ <b>Are you sure you want to permanently delete <u>{name}</u>?</b>\n\nThis will delete {qty} unsold items.\n\n<i>Note: Categories with sold items are archived instead.</i>",
+    "category_archived": "🗄️ Category <b>{name}</b> has been archived ({sold_count} sold items preserved).",
+    "category_deleted": "✅ Category <b>{name}</b> has been permanently deleted.",
+    "reactivate_category": "♻️ Reactivate Category",
+    "category_reactivated": "✅ Category <b>{name}</b> has been reactivated and is now visible to users."
   },
   "common": {
     "back_button": "⬅️ Back",

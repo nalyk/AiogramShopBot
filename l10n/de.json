@@ -109,7 +109,15 @@
     "transactions_broadcasted": "<b>{transactions_count} Transaktionen erfolgreich übertragen!\n</b>",
     "transaction": "Transaktion",
     "send_addr_request": "Bitte sende deine {crypto_name} Adresse:",
-    "no_deposits_to_withdrawn": "<b>Derzeit sind keine Einzahlungen zum Abheben bereit!</b>"
+    "no_deposits_to_withdrawn": "<b>Derzeit sind keine Einzahlungen zum Abheben bereit!</b>",
+    "show_archived": "🗄️ Archiviert anzeigen",
+    "show_active": "📂 Aktiv anzeigen",
+    "confirm_archive_category": "⚠️ <b>Kategorie <u>{name}</u> hat {sold_count} verkaufte Artikel.</b>\n\nDiese Kategorie wird <b>archiviert</b> (für Benutzer ausgeblendet) aber für die Kaufhistorie aufbewahrt.\n\n{qty} unverkaufte Artikel bleiben erhalten.\n\nMit Archivierung fortfahren?",
+    "confirm_delete_category": "⚠️ <b>Bist du sicher, dass du <u>{name}</u> dauerhaft löschen möchtest?</b>\n\nDies löscht {qty} unverkaufte Artikel.\n\n<i>Hinweis: Kategorien mit verkauften Artikeln werden stattdessen archiviert.</i>",
+    "category_archived": "🗄️ Kategorie <b>{name}</b> wurde archiviert ({sold_count} verkaufte Artikel aufbewahrt).",
+    "category_deleted": "✅ Kategorie <b>{name}</b> wurde dauerhaft gelöscht.",
+    "reactivate_category": "♻️ Kategorie reaktivieren",
+    "category_reactivated": "✅ Kategorie <b>{name}</b> wurde reaktiviert und ist jetzt für Benutzer sichtbar."
   },
   "common": {
     "back_button": "⬅️ Zurück",

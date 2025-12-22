@@ -77,6 +77,17 @@ class ItemRepository:
         await session_execute(stmt, session)
 
     @staticmethod
+    async def count_sold_by_category_id(category_id: int, session: Session | AsyncSession) -> int:
+        """Count sold items for a category (used for archive decision)."""
+        stmt = (
+            select(func.count())
+            .select_from(Item)
+            .where(Item.category_id == category_id, Item.is_sold == True)
+        )
+        result = await session_execute(stmt, session)
+        return result.scalar() or 0
+
+    @staticmethod
     async def add_many(items: list[ItemDTO], session: Session | AsyncSession):
         """Add multiple items."""
         item_objs = [Item(**item.model_dump(exclude_none=True)) for item in items]

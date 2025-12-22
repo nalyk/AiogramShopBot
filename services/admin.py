@@ -96,27 +96,29 @@ class AdminService:
         unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
         category_id = unpacked_cb.category_id
         page = unpacked_cb.page
+        show_archived = unpacked_cb.show_archived
         kb_builder = InlineKeyboardBuilder()
 
         if category_id == -1:
-            categories = await CategoryRepository.get_all_roots(session)
+            categories = await CategoryRepository.get_all_roots_filtered(page, session, show_archived)
             breadcrumb_str = Localizator.get_text(BotEntity.ADMIN, "root_level")
             parent_id_for_back = None
         else:
-            categories = await CategoryRepository.get_all_children(category_id, session)
+            categories = await CategoryRepository.get_all_children_filtered(category_id, page, session, show_archived)
             current_cat = await CategoryRepository.get_by_id(category_id, session)
             breadcrumb = await CategoryRepository.get_breadcrumb(category_id, session)
             breadcrumb_str = " > ".join([c.name for c in breadcrumb])
             parent_id_for_back = current_cat.parent_id if current_cat else None
 
         for cat in categories:
+            archived_indicator = "🗄️ " if not cat.is_active else ""
             if cat.is_product:
                 qty = await CategoryRepository.get_available_qty(cat.id, session)
-                button_text = f"📦 {cat.name} ({qty} items)"
+                button_text = f"{archived_indicator}📦 {cat.name} ({qty} items)"
                 next_level = 2
             else:
                 child_count = await CategoryRepository.count_children(cat.id, session)
-                button_text = f"📁 {cat.name} ({child_count})"
+                button_text = f"{archived_indicator}📁 {cat.name} ({child_count})"
                 next_level = 1
 
             kb_builder.button(
@@ -124,30 +126,45 @@ class AdminService:
                 callback_data=AdminInventoryManagementCallback.create(
                     level=next_level,
                     category_id=cat.id,
-                    page=0
+                    page=0,
+                    show_archived=show_archived
                 )
             )
 
         kb_builder.adjust(1)
 
-        action_buttons = []
-        action_buttons.append(types.InlineKeyboardButton(
-            text=Localizator.get_text(BotEntity.ADMIN, "add_category_btn"),
+        # Action buttons (only for active view)
+        if not show_archived:
+            action_buttons = []
+            action_buttons.append(types.InlineKeyboardButton(
+                text=Localizator.get_text(BotEntity.ADMIN, "add_category_btn"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3,
+                    category_id=category_id,
+                    action=InventoryAction.ADD_CATEGORY
+                ).pack()
+            ))
+            action_buttons.append(types.InlineKeyboardButton(
+                text=Localizator.get_text(BotEntity.ADMIN, "add_product_btn"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3,
+                    category_id=category_id,
+                    action=InventoryAction.ADD_PRODUCT
+                ).pack()
+            ))
+            kb_builder.row(*action_buttons)
+
+        # Archive toggle button
+        toggle_text = Localizator.get_text(BotEntity.ADMIN, "show_active") if show_archived else Localizator.get_text(BotEntity.ADMIN, "show_archived")
+        kb_builder.row(types.InlineKeyboardButton(
+            text=toggle_text,
             callback_data=AdminInventoryManagementCallback.create(
-                level=3,
+                level=1,
                 category_id=category_id,
-                action=InventoryAction.ADD_CATEGORY
+                page=0,
+                show_archived=not show_archived
             ).pack()
         ))
-        action_buttons.append(types.InlineKeyboardButton(
-            text=Localizator.get_text(BotEntity.ADMIN, "add_product_btn"),
-            callback_data=AdminInventoryManagementCallback.create(
-                level=3,
-                category_id=category_id,
-                action=InventoryAction.ADD_PRODUCT
-            ).pack()
-        ))
-        kb_builder.row(*action_buttons)
 
         if category_id == -1:
             kb_builder.row(AdminConstants.back_to_main_button)
@@ -158,11 +175,13 @@ class AdminService:
                 callback_data=AdminInventoryManagementCallback.create(
                     level=1,
                     category_id=back_cat_id,
-                    page=0
+                    page=0,
+                    show_archived=show_archived
                 ).pack()
             ))
 
-        msg = f"📂 {breadcrumb_str}\n\n"
+        archive_indicator = " [ARCHIVED]" if show_archived else ""
+        msg = f"📂 {breadcrumb_str}{archive_indicator}\n\n"
         if len(categories) == 0:
             msg += Localizator.get_text(BotEntity.ADMIN, "no_items_here")
         else:
@@ -177,6 +196,7 @@ class AdminService:
     ) -> tuple[str, InlineKeyboardBuilder]:
         unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
         category_id = unpacked_cb.category_id
+        show_archived = unpacked_cb.show_archived
         kb_builder = InlineKeyboardBuilder()
 
         product = await CategoryRepository.get_by_id(category_id, session)
@@ -188,36 +208,47 @@ class AdminService:
         breadcrumb = await CategoryRepository.get_breadcrumb(category_id, session)
         breadcrumb_str = " > ".join([c.name for c in breadcrumb])
 
-        kb_builder.button(
-            text=Localizator.get_text(BotEntity.ADMIN, "add_items_to_product"),
-            callback_data=AdminInventoryManagementCallback.create(
-                level=3, category_id=category_id, action=InventoryAction.ADD_ITEMS
+        if product.is_active:
+            # Active product - show normal management options
+            kb_builder.button(
+                text=Localizator.get_text(BotEntity.ADMIN, "add_items_to_product"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3, category_id=category_id, action=InventoryAction.ADD_ITEMS
+                )
             )
-        )
-        kb_builder.button(
-            text=Localizator.get_text(BotEntity.ADMIN, "edit_price"),
-            callback_data=AdminInventoryManagementCallback.create(
-                level=3, category_id=category_id, action=InventoryAction.EDIT_PRICE
+            kb_builder.button(
+                text=Localizator.get_text(BotEntity.ADMIN, "edit_price"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3, category_id=category_id, action=InventoryAction.EDIT_PRICE
+                )
             )
-        )
-        kb_builder.button(
-            text=Localizator.get_text(BotEntity.ADMIN, "edit_description"),
-            callback_data=AdminInventoryManagementCallback.create(
-                level=3, category_id=category_id, action=InventoryAction.EDIT_DESCRIPTION
+            kb_builder.button(
+                text=Localizator.get_text(BotEntity.ADMIN, "edit_description"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3, category_id=category_id, action=InventoryAction.EDIT_DESCRIPTION
+                )
             )
-        )
-        kb_builder.button(
-            text=Localizator.get_text(BotEntity.ADMIN, "edit_image"),
-            callback_data=AdminInventoryManagementCallback.create(
-                level=3, category_id=category_id, action=InventoryAction.EDIT_IMAGE
+            kb_builder.button(
+                text=Localizator.get_text(BotEntity.ADMIN, "edit_image"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3, category_id=category_id, action=InventoryAction.EDIT_IMAGE
+                )
             )
-        )
-        kb_builder.button(
-            text=Localizator.get_text(BotEntity.ADMIN, "delete_product"),
-            callback_data=AdminInventoryManagementCallback.create(
-                level=4, category_id=category_id, action=InventoryAction.DELETE
+            kb_builder.button(
+                text=Localizator.get_text(BotEntity.ADMIN, "delete_product"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=4, category_id=category_id, action=InventoryAction.DELETE
+                )
             )
-        )
+        else:
+            # Archived product - show reactivate option
+            kb_builder.button(
+                text=Localizator.get_text(BotEntity.ADMIN, "reactivate_category"),
+                callback_data=AdminInventoryManagementCallback.create(
+                    level=3, category_id=category_id, action=InventoryAction.REACTIVATE,
+                    show_archived=show_archived
+                )
+            )
         kb_builder.adjust(1)
 
         back_cat_id = product.parent_id if product.parent_id is not None else -1
@@ -226,13 +257,15 @@ class AdminService:
             callback_data=AdminInventoryManagementCallback.create(
                 level=1,
                 category_id=back_cat_id,
-                page=0
+                page=0,
+                show_archived=show_archived
             ).pack()
         ))
 
+        archived_indicator = " [ARCHIVED]" if not product.is_active else ""
         msg = Localizator.get_text(BotEntity.ADMIN, "product_info").format(
             breadcrumb=breadcrumb_str,
-            name=product.name,
+            name=product.name + archived_indicator,
             price=product.price or 0,
             currency_sym=Localizator.get_currency_symbol(),
             description=product.description or "-",
@@ -251,11 +284,13 @@ class AdminService:
         unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
         action = unpacked_cb.action
         category_id = unpacked_cb.category_id
+        show_archived = unpacked_cb.show_archived
         kb_builder = InlineKeyboardBuilder()
 
         cancel_cb = AdminInventoryManagementCallback.create(
             level=1 if category_id == -1 else (2 if (await CategoryRepository.get_by_id(category_id, session) or type('', (), {'is_product': False})).is_product else 1),
-            category_id=category_id
+            category_id=category_id,
+            show_archived=show_archived
         )
         kb_builder.button(
             text=Localizator.get_text(BotEntity.COMMON, "cancel"),
@@ -346,6 +381,29 @@ class AdminService:
                 )
                 return msg, kb_builder
 
+            case InventoryAction.REACTIVATE:
+                # Reactivate archived category
+                category = await CategoryRepository.get_by_id(category_id, session)
+                if category:
+                    await CategoryRepository.set_active(category_id, session)
+                    await session_commit(session)
+                    msg = Localizator.get_text(BotEntity.ADMIN, "category_reactivated").format(
+                        name=category.name
+                    )
+                else:
+                    msg = Localizator.get_text(BotEntity.ADMIN, "category_not_found")
+                
+                kb_builder = InlineKeyboardBuilder()
+                kb_builder.row(types.InlineKeyboardButton(
+                    text=Localizator.get_text(BotEntity.COMMON, "back_button"),
+                    callback_data=AdminInventoryManagementCallback.create(
+                        level=1,
+                        category_id=-1,
+                        show_archived=False
+                    ).pack()
+                ))
+                return msg, kb_builder
+
             case _:
                 return Localizator.get_text(BotEntity.ADMIN, "unknown_action"), kb_builder
 
@@ -364,6 +422,7 @@ class AdminService:
             return Localizator.get_text(BotEntity.ADMIN, "category_not_found"), kb_builder
 
         qty = await CategoryRepository.get_available_qty(category_id, session)
+        sold_count = await CategoryRepository.count_sold_in_subtree(category_id, session)
 
         kb_builder.button(
             text=Localizator.get_text(BotEntity.COMMON, "confirm"),
@@ -378,10 +437,19 @@ class AdminService:
             )
         )
 
-        msg = Localizator.get_text(BotEntity.ADMIN, "confirm_delete_product").format(
-            name=category.name,
-            qty=qty
-        )
+        if sold_count > 0:
+            # Will archive
+            msg = Localizator.get_text(BotEntity.ADMIN, "confirm_archive_category").format(
+                name=category.name,
+                qty=qty,
+                sold_count=sold_count
+            )
+        else:
+            # Will fully delete
+            msg = Localizator.get_text(BotEntity.ADMIN, "confirm_delete_category").format(
+                name=category.name,
+                qty=qty
+            )
 
         return msg, kb_builder
 
@@ -390,6 +458,9 @@ class AdminService:
         callback: CallbackQuery,
         session: AsyncSession | Session
     ) -> tuple[str, InlineKeyboardBuilder]:
+        """
+        Smart delete: archives if sold items exist, otherwise fully deletes.
+        """
         unpacked_cb = AdminInventoryManagementCallback.unpack(callback.data)
         category_id = unpacked_cb.category_id
         kb_builder = InlineKeyboardBuilder()
@@ -402,8 +473,22 @@ class AdminService:
         category_name = category.name
         parent_id = category.parent_id
 
-        await ItemRepository.delete_unsold_by_category_id(category_id, session)
-        await session_commit(session)
+        # Check for sold items in subtree
+        sold_count = await CategoryRepository.count_sold_in_subtree(category_id, session)
+
+        if sold_count > 0:
+            # Archive: set inactive (preserves purchase history)
+            await CategoryRepository.set_inactive(category_id, session)
+            await session_commit(session)
+            msg = Localizator.get_text(BotEntity.ADMIN, "category_archived").format(
+                name=category_name,
+                sold_count=sold_count
+            )
+        else:
+            # Full delete: no sold items, safe to remove entirely
+            await CategoryRepository.delete_by_id(category_id, session)
+            await session_commit(session)
+            msg = Localizator.get_text(BotEntity.ADMIN, "category_deleted").format(name=category_name)
 
         back_cat_id = parent_id if parent_id is not None else -1
         kb_builder.row(types.InlineKeyboardButton(
@@ -414,7 +499,7 @@ class AdminService:
             ).pack()
         ))
 
-        return Localizator.get_text(BotEntity.ADMIN, "product_deleted").format(name=category_name), kb_builder
+        return msg, kb_builder
 
     @staticmethod
     async def get_user_management_menu() -> tuple[str, InlineKeyboardBuilder]:

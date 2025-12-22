@@ -19,6 +19,7 @@ class Category(Base):
     parent_id = Column(Integer, ForeignKey("categories.id", ondelete="CASCADE"), nullable=True)
     name = Column(String, nullable=False)
     is_product = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)  # For archive/soft-delete
 
     # Product-specific fields (only used when is_product=True)
     image_file_id = Column(String, nullable=True)  # Telegram file_id for product photo
@@ -45,6 +46,7 @@ class CategoryDTO(BaseModel):
     parent_id: int | None = None
     name: str | None = None
     is_product: bool = False
+    is_active: bool = True
     image_file_id: str | None = None
     description: str | None = None
     price: float | None = None

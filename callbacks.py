@@ -111,6 +111,7 @@ class InventoryAction(IntEnum):
     EDIT_DESCRIPTION = 5
     EDIT_IMAGE = 6
     DELETE = 7
+    REACTIVATE = 8
 
 
 class AdminInventoryManagementCallback(BaseCallback, prefix="inv"):
@@ -119,6 +120,7 @@ class AdminInventoryManagementCallback(BaseCallback, prefix="inv"):
     add_type: AddType | None
     page: int
     confirmation: bool
+    show_archived: bool
 
     @staticmethod
     def create(
@@ -127,7 +129,8 @@ class AdminInventoryManagementCallback(BaseCallback, prefix="inv"):
         action: InventoryAction | None = None,
         add_type: AddType | None = None,
         page: int = 0,
-        confirmation: bool = False
+        confirmation: bool = False,
+        show_archived: bool = False
     ):
         return AdminInventoryManagementCallback(
             level=level,
@@ -135,7 +138,8 @@ class AdminInventoryManagementCallback(BaseCallback, prefix="inv"):
             action=action,
             add_type=add_type,
             page=page,
-            confirmation=confirmation
+            confirmation=confirmation,
+            show_archived=show_archived
         )
 
 
